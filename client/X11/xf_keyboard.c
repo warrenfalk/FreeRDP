@@ -30,6 +30,7 @@
 #include <winpr/collections.h>
 
 #include <X11/Xlib.h>
+#include <X11/Xatom.h>
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
 #include <X11/XKBlib.h>
@@ -443,6 +444,81 @@ static int xk_keyboard_get_modifier_keys(xfContext* xfc, XF_MODIFIER_KEYS* mod)
 	return 0;
 }
 
+static int client_msg(Display *disp, Window win, char *msg,
+        unsigned long data0, unsigned long data1,
+        unsigned long data2, unsigned long data3,
+        unsigned long data4) {
+    XEvent event;
+    long mask = SubstructureRedirectMask | SubstructureNotifyMask;
+
+    event.xclient.type = ClientMessage;
+    event.xclient.serial = 0;
+    event.xclient.send_event = True;
+    event.xclient.message_type = XInternAtom(disp, msg, False);
+    event.xclient.window = win;
+    event.xclient.format = 32;
+    event.xclient.data.l[0] = data0;
+    event.xclient.data.l[1] = data1;
+    event.xclient.data.l[2] = data2;
+    event.xclient.data.l[3] = data3;
+    event.xclient.data.l[4] = data4;
+
+    if (XSendEvent(disp, DefaultRootWindow(disp), False, mask, &event)) {
+        return EXIT_SUCCESS;
+    }
+    else {
+        fprintf(stderr, "Cannot send %s event.\n", msg);
+        return EXIT_FAILURE;
+    }
+}
+
+static unsigned char *get_property (
+        Display *disp,
+        Window win,
+        Atom xa_prop_type,
+        const char *prop_name,
+        unsigned long *size)
+{
+    Atom xa_prop_name;
+    Atom xa_ret_type;
+    int ret_format;
+    unsigned long ret_nitems;
+    unsigned long ret_bytes_after;
+    unsigned long tmp_size;
+    unsigned char *ret_prop;
+    unsigned char *ret;
+
+    xa_prop_name = XInternAtom(disp, prop_name, False);
+
+    if (XGetWindowProperty(disp, win, xa_prop_name, 0, 1024, False,
+            xa_prop_type, &xa_ret_type, &ret_format,
+            &ret_nitems, &ret_bytes_after, &ret_prop) != Success) {
+        printf("Cannot get %s property.\n", prop_name);
+        return NULL;
+    }
+
+    if (xa_ret_type != xa_prop_type) {
+        printf("Invalid type of %s property.\n", prop_name);
+        XFree(ret_prop);
+        return NULL;
+    }
+
+    /* null terminate the result to make string handling easier */
+    tmp_size = (ret_format / 8) * ret_nitems;
+    /* Correct 64 Architecture implementation of 32 bit data */
+    //if(ret_format==32) tmp_size *= sizeof(long)/4;
+    ret = malloc(tmp_size + 1);
+    memcpy(ret, ret_prop, tmp_size);
+    ret[tmp_size] = '\0';
+
+    if (size) {
+        *size = tmp_size;
+    }
+
+    XFree(ret_prop);
+    return ret;
+}
+
 BOOL xf_keyboard_handle_special_keys(xfContext* xfc, KeySym keysym)
 {
 	XF_MODIFIER_KEYS mod = { 0 };
@@ -479,6 +555,55 @@ BOOL xf_keyboard_handle_special_keys(xfContext* xfc, KeySym keysym)
 			{
 				/* Ctrl-Alt-Enter: toggle full screen */
 				xf_toggle_fullscreen(xfc);
+				return TRUE;
+			}
+		}
+		if (keysym == XK_Down || keysym == XK_Up)
+		{
+			if (mod.Ctrl && mod.Alt)
+			{
+				Window root = DefaultRootWindow(xfc->display);
+
+				unsigned long *num_desktops = (unsigned long *)get_property(
+					xfc->display, root,
+					XA_CARDINAL, "_NET_NUMBER_OF_DESKTOPS", NULL);
+
+				if (!num_desktops)
+				{
+					printf("KBD: can't get number of desktops\n");
+					return TRUE;
+				}
+
+				unsigned long *cur_desktop = (unsigned long*)get_property(
+					xfc->display, root,
+					XA_CARDINAL, "_NET_CURRENT_DESKTOP", NULL);
+
+				if (!cur_desktop)
+				{
+					printf("KBD: can't get current desktops\n");
+					return TRUE;
+				}
+
+				int target = (int)*cur_desktop;
+
+				if (keysym == XK_Down)
+					target++;
+				else
+					target--;
+
+				if (target < 0 || target >= *num_desktops)
+				{
+					printf("KBD: at end of desktops");
+					return TRUE;
+				}
+
+				KeyCode code = XKeysymToKeycode(xfc->display, keysym);
+				//printf("KDB: Captured code:%d\n", code);
+				XUngrabKeyboard(xfc->display, CurrentTime);
+
+				client_msg(xfc->display, root, "_NET_CURRENT_DESKTOP",
+					(unsigned long)target, 0, 0, 0, 0);
+
 				return TRUE;
 			}
 		}
